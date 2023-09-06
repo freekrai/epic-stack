@@ -38,9 +38,8 @@ export default async function handleRequest(...args: DocRequestArgs) {
 		: 'onShellReady'
 
 	const nonce = String(loadContext.cspNonce) ?? undefined
-	return new Promise((resolve, reject) => {
+	return new Promise(async (resolve, reject) => {
 		let didError = false
-
 		// NOTE: this timing will only include things that are rendered in the shell
 		// and will not include suspended components and deferred loaders
 		const timings = makeTimings('render', 'renderToPipeableStream')

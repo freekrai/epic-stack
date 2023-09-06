@@ -55,7 +55,13 @@ type ImageFieldset = z.infer<typeof ImageFieldsetSchema>
 function imageHasFile(
 	image: ImageFieldset,
 ): image is ImageFieldset & { file: NonNullable<ImageFieldset['file']> } {
-	return Boolean(image.file)
+	return Boolean(image.file?.size && image.file?.size > 0)
+}
+
+function imageHasId(
+	image: ImageFieldset,
+): image is ImageFieldset & { id: NonNullable<ImageFieldset['id']> } {
+	return image.id != null
 }
 
 const NoteEditorSchema = z.object({
@@ -90,16 +96,34 @@ export async function action({ request }: DataFunctionArgs) {
 		}).transform(async ({ images = [], ...data }) => {
 			return {
 				...data,
-				images: await Promise.all(
-					images.filter(imageHasFile).map(async image => ({
-						id: image.id,
-						altText: image.altText,
-						contentType: image.file.type,
-						blob:
-							image.file.size > 0
-								? Buffer.from(await image.file.arrayBuffer())
-								: null,
-					})),
+				imageUpdates: await Promise.all(
+					images.filter(imageHasId).map(async i => {
+						if (imageHasFile(i)) {
+							return {
+								id: i.id,
+								altText: i.altText,
+								contentType: i.file.type,
+								blob: Buffer.from(await i.file.arrayBuffer()),
+							}
+						} else {
+							return {
+								id: i.id,
+								altText: i.altText,
+							}
+						}
+					}),
+				),
+				newImages: await Promise.all(
+					images
+						.filter(imageHasFile)
+						.filter(i => !i.id)
+						.map(async image => {
+							return {
+								altText: image.altText,
+								contentType: image.file.type,
+								blob: Buffer.from(await image.file.arrayBuffer()),
+							}
+						}),
 				),
 			}
 		}),
@@ -114,51 +138,35 @@ export async function action({ request }: DataFunctionArgs) {
 		return json({ status: 'error', submission } as const, { status: 400 })
 	}
 
-	const { id: noteId, title, content, images = [] } = submission.value
+	const {
+		id: noteId,
+		title,
+		content,
+		imageUpdates = [],
+		newImages = [],
+	} = submission.value
 
-	const updatedNote = await prisma.$transaction(async $prisma => {
-		const note = await $prisma.note.upsert({
-			select: { id: true, owner: { select: { username: true } } },
-			where: { id: noteId ?? '__new_note__' },
-			create: {
-				ownerId: userId,
-				title,
-				content,
+	const updatedNote = await prisma.note.upsert({
+		select: { id: true, owner: { select: { username: true } } },
+		where: { id: noteId ?? '__new_note__' },
+		create: {
+			ownerId: userId,
+			title,
+			content,
+			images: { create: newImages },
+		},
+		update: {
+			title,
+			content,
+			images: {
+				deleteMany: { id: { notIn: imageUpdates.map(i => i.id) } },
+				updateMany: imageUpdates.map(updates => ({
+					where: { id: updates.id },
+					data: { ...updates, id: updates.blob ? cuid() : updates.id },
+				})),
+				create: newImages,
 			},
-			update: {
-				title,
-				content,
-				images: {
-					deleteMany: { id: { notIn: images.map(i => i.id).filter(Boolean) } },
-				},
-			},
-		})
-
-		for (const image of images) {
-			const { blob } = image
-			if (blob) {
-				await $prisma.noteImage.upsert({
-					select: { id: true },
-					where: { id: image.id ?? '__new_image__' },
-					create: { ...image, blob, noteId: note.id },
-					update: {
-						...image,
-						blob,
-						// update the id since it is used for caching
-						id: cuid(),
-						noteId: note.id,
-					},
-				})
-			} else if (image.id) {
-				await $prisma.noteImage.update({
-					select: { id: true },
-					where: { id: image.id },
-					data: { altText: image.altText },
-				})
-			}
-		}
-
-		return note
+		},
 	})
 
 	return redirect(
